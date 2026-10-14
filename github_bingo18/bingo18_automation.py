@@ -36,21 +36,22 @@ def scheduled_fetch_time(now: datetime) -> datetime:
 
 
 def wait_for_scheduled_fetch(event_name: str) -> datetime | None:
-    """Manual runs fetch immediately; scheduled runs fetch in the 22:05 minute.
+    """Manual runs fetch immediately; scheduled runs wait until 22:05.
 
-    A job arriving after the window fails before fetching or changing Excel.
+    Late scheduled jobs still fetch on the same day, until VN midnight.
+    Jobs arriving on the following day fail before fetching or changing Excel.
     This must be used with the accompanying 19:00 VN workflow schedule.
     """
     if event_name != "schedule":
         return None
     target = scheduled_fetch_time(datetime.now(VN_TIMEZONE))
-    deadline = target + timedelta(minutes=1)
+    deadline = target.replace(hour=0, minute=0) + timedelta(days=1)
     print(f"Chờ lấy dữ liệu lúc {target:%d/%m/%Y %H:%M:%S} giờ Việt Nam.", flush=True)
     while True:
         now = datetime.now(VN_TIMEZONE)
         if now >= deadline:
             raise RuntimeError(
-                "Job đã trễ qua phút 22:05. Không lấy API, không sửa Excel. "
+                "Job đã trễ sang ngày hôm sau. Không lấy API, không sửa Excel. "
                 f"Mục tiêu: {target:%d/%m/%Y %H:%M}; thực tế: {now:%d/%m/%Y %H:%M:%S}."
             )
         remaining = (target - now).total_seconds()
@@ -160,7 +161,7 @@ def main() -> None:
     fetched_at = datetime.now(VN_TIMEZONE)
     if deadline is not None and fetched_at >= deadline:
         raise RuntimeError(
-            "API trả dữ liệu quá muộn, đã qua phút 22:05. Không sửa Excel."
+            "API trả dữ liệu khi đã sang ngày hôm sau. Không sửa Excel."
         )
     counts = extract_counts(data)
     action = write_history(path, counts, note, fetched_at)
