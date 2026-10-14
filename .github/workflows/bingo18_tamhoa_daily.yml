@@ -2,7 +2,7 @@ name: Luu lich su Tam hoa Bingo18
 
 on:
   schedule:
-    - cron: "5 15 * * *"
+    - cron: "0 12 * * *"  # 19:00 Vietnam (UTC+7); Python waits until 22:05
   workflow_dispatch:
 
 permissions:
@@ -11,6 +11,7 @@ permissions:
 jobs:
   update-excel:
     runs-on: ubuntu-latest
+    timeout-minutes: 240
     steps:
       - name: Lay bo file trong GitHub
         uses: actions/checkout@v4
@@ -24,7 +25,7 @@ jobs:
         run: python -m pip install openpyxl==3.1.5
 
       - name: Lay du lieu va cap nhat Excel
-        run: python github_bingo18/bingo18_automation.py
+        run: python -u github_bingo18/bingo18_automation.py
 
       - name: Luu file Excel moi vao GitHub
         run: |
@@ -34,6 +35,6 @@ jobs:
           if git diff --cached --quiet; then
             echo "Khong co thay doi moi."
           else
-            git commit -m "Cap nhat Tam hoa $(date -u +'%Y-%m-%d')"
+            git commit -m "Cap nhat Tam hoa $(TZ=Asia/Ho_Chi_Minh date +'%Y-%m-%d')"
             git push
           fi
