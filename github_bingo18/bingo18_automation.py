@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import argparse
 import json
 import os
 import ssl
@@ -11,7 +10,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
-from datetime import date, datetime, time as datetime_time, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -27,24 +26,38 @@ VN_TIMEZONE = ZoneInfo("Asia/Ho_Chi_Minh")
 
 
 
-SCHEDULE_TIME = datetime_time(22, 5)
-
-
-def resolve_statistics_date(
-    now: datetime, event_name: str, explicit_date: str | None = None
-) -> date:
-    """Scheduled jobs use the latest 22:05 session; manual jobs use today.
-
-    --statistics-date or BINGO18_STATISTICS_DATE (YYYY-MM-DD) overrides
-    this rule for a manual backfill or a rerun of an older session.
-    The cutoff fallback cannot identify delays longer than one daily cycle.
-    """
+def scheduled_fetch_time(now: datetime) -> datetime:
+    """Latest daily 19:00 launch is assigned a 22:05 fetch on that day."""
     now = now.astimezone(VN_TIMEZONE)
-    if explicit_date is not None:
-        return date.fromisoformat(explicit_date)
-    if event_name == "schedule" and now.time() < SCHEDULE_TIME:
-        return now.date() - timedelta(days=1)
-    return now.date()
+    launch = now.replace(hour=19, minute=0, second=0, microsecond=0)
+    if now < launch:
+        launch -= timedelta(days=1)
+    return launch.replace(hour=22, minute=5)
+
+
+def wait_for_scheduled_fetch(event_name: str) -> datetime | None:
+    """Manual runs fetch immediately; scheduled runs fetch in the 22:05 minute.
+
+    A job arriving after the window fails before fetching or changing Excel.
+    This must be used with the accompanying 19:00 VN workflow schedule.
+    """
+    if event_name != "schedule":
+        return None
+    target = scheduled_fetch_time(datetime.now(VN_TIMEZONE))
+    deadline = target + timedelta(minutes=1)
+    print(f"Chờ lấy dữ liệu lúc {target:%d/%m/%Y %H:%M:%S} giờ Việt Nam.", flush=True)
+    while True:
+        now = datetime.now(VN_TIMEZONE)
+        if now >= deadline:
+            raise RuntimeError(
+                "Job đã trễ qua phút 22:05. Không lấy API, không sửa Excel. "
+                f"Mục tiêu: {target:%d/%m/%Y %H:%M}; thực tế: {now:%d/%m/%Y %H:%M:%S}."
+            )
+        remaining = (target - now).total_seconds()
+        if remaining <= 0:
+            print("Đến giờ: bắt đầu lấy API.", flush=True)
+            return deadline
+        time.sleep(min(remaining, 30))
 
 
 def fetch_json() -> tuple[dict, str]:
@@ -89,35 +102,31 @@ def extract_counts(data: dict) -> dict[str, int]:
 
 def write_history(
     path: Path, counts: dict[str, int], note: str,
-    statistics_date: date | None = None,
+    fetched_at: datetime | None = None,
 ) -> str:
     if not path.exists():
         raise FileNotFoundError(f"Không tìm thấy file Excel mẫu: {path}")
     wb = load_workbook(path)
     ws = wb[SHEET_NAME]
-    now = datetime.now(VN_TIMEZONE)
-    if statistics_date is None:
-        statistics_date = resolve_statistics_date(
-            now, os.environ.get("GITHUB_EVENT_NAME", ""),
-            os.environ.get("BINGO18_STATISTICS_DATE"),
-        )
+    now = (fetched_at or datetime.now(VN_TIMEZONE)).astimezone(VN_TIMEZONE)
+    today = now.date()
 
     target_row = None
     for row in range(5, ws.max_row + 1):
         value = ws.cell(row, 1).value
         if isinstance(value, datetime):
             value = value.date()
-        if value == statistics_date:
+        if value == today:
             target_row = row
             break
 
-    action = "Cập nhật dòng ngày thống kê" if target_row else "Thêm dòng mới"
+    action = "Cập nhật dòng hôm nay" if target_row else "Thêm dòng mới"
     if target_row is None and ws.cell(5, 1).value is None:
         target_row = 5
     target_row = target_row or max(ws.max_row + 1, 5)
 
     values = [
-        datetime.combine(statistics_date, datetime_time.min),
+        now.replace(tzinfo=None),
         now.replace(tzinfo=None),
         *[counts[key] for key in TRIPLES],
         DATA_URL,
@@ -145,24 +154,17 @@ def write_history(
 def main() -> None:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--statistics-date", default=os.environ.get("BINGO18_STATISTICS_DATE"),
-        help="Ngày thống kê chạy bù, YYYY-MM-DD (ưu tiên hơn lịch tự động).",
-    )
-    args = parser.parse_args()
-    try:
-        statistics_date = resolve_statistics_date(
-            datetime.now(VN_TIMEZONE), os.environ.get("GITHUB_EVENT_NAME", ""),
-            args.statistics_date,
-        )
-    except ValueError:
-        parser.error("Ngày thống kê phải là ngày hợp lệ theo định dạng YYYY-MM-DD.")
     path = Path(__file__).resolve().parent / WORKBOOK_NAME
+    deadline = wait_for_scheduled_fetch(os.environ.get("GITHUB_EVENT_NAME", ""))
     data, note = fetch_json()
+    fetched_at = datetime.now(VN_TIMEZONE)
+    if deadline is not None and fetched_at >= deadline:
+        raise RuntimeError(
+            "API trả dữ liệu quá muộn, đã qua phút 22:05. Không sửa Excel."
+        )
     counts = extract_counts(data)
-    action = write_history(path, counts, note, statistics_date)
-    print(action + f" ({statistics_date:%d/%m/%Y}): " + ", ".join(f"{k}={counts[k]}" for k in TRIPLES))
+    action = write_history(path, counts, note, fetched_at)
+    print(action + ": " + ", ".join(f"{k}={counts[k]}" for k in TRIPLES))
 
 
 if __name__ == "__main__":
